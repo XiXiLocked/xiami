@@ -1,97 +1,116 @@
 from sys import stdin
-from requests import session,exceptions
+from requests import session, exceptions
 from bs4 import BeautifulSoup
+from json import loads
 
-class Account(object):
+
+class XiamiAccount(object):
+    loginURL = 'https://login.xiami.com/member/login'
+    logoutURL = 'http://www.xiami.com/member/logout'
     def __init__(self, email, password):
         self.email = email
         self.password = password
-
-class Login(Account):
-    loginurl = 'https://login.xiami.com/member/login'
-    logouturl = 'http://www.xiami.com/member/logout'
-    def __init__(self, email, password):
-        super(Login, self).__init__(email,password)
         self.session = session()
-        self.form = {} #form for login post
         self.loggedin = False
 
-    def fill_form(self):
+    def get_form(self):
+        "get hidden login information"
         try:
-            #get hidden login information
-            html = self.session.get(Login.loginurl).text
-            for item in BeautifulSoup(html).form.find_all('input'):
-                #because password input box has no 'value'
-                self.form[item.get('name') ] = item.get('value')
-            self.form['email'] = self.email
-            self.form['password'] = self.password
+            r =  self.session.get(XiamiAccount.loginURL)
+            if r.status_code == 200:
+                form = {}
+                for item in BeautifulSoup(r.text).form.find_all('input'):
+                    form[item.get('name') ] = item.get('value')
+                return form
         except exceptions.RequestException:
-            #ignore connection exception
             pass
+
+        return None
+
 
 
     def login(self):
+        form = self.get_form()
+        form['email'] = self.email
+        form['password'] = self.password
         try:
-            self.fill_form()
-            r = self.session.post(Login.loginurl, data = self.form)
-            if r.status_code ==200:
-                self.loggedin = True
+            r = self.session.post(XiamiAccount.loginURL, data = form)
+            if r.status_code == 200:
+                response = loads(r.text)
+                self.loggedin = response['status']
+                return response
         except exceptions.RequestException:
             pass
+
+        return None
+
 
     def logout(self):
         try:
-            self.session.get(Login.logouturl)
+            self.session.get(XiamiAccount.logoutURL)
+        except exceptions.RequestException:
+            pass
+        finally :
             self.session.close()
             self.loggedin = False
-        except exceptions.RequestException:
-            pass
 
-class Signin(Login):
-    signurl = 'http://www.xiami.com/task/signin'
+class XiamiSignin(object):
+    Referer = 'http://www.xiami.com'
+    InfoURL = Referer+'/index/home'
+    SigninURL =  Referer+'/task/signin'
+    #the following two header lines are nessary for retrieve infos
+    header = {#'X-Requested-With' : 'XMLHttpRequest',
+            'Referer' :Referer,
+            'User-Agent':''}#empty is ok, but not be absent
     def __init__(self, email, password):
-        super(Signin, self).__init__(email, password)
-        self.signedday = 0
-        #the following two header lines are nessary for signin
-        self.head = {'Referer':'http://www.xiami.com',
-                #'X-Requested-With':'XMLHttpRequest',
-                'User-Agent':''}#empty is ok, just present it.
+        self.account = XiamiAccount(email, password)
+        self.signed = False
 
-    def day(self):
-        #get signinde days
+    def sign_info(self):
+        if not self.account.loggedin:
+            self.account.login()
+        "get signin info"
         try:
-            r = self.session.post(Signin.signurl,headers = self.head)
-            if r.status_code ==200:
-                self.signedday = r.text
+            r = self.account.session.get(XiamiSignin.InfoURL,
+                    headers = XiamiSignin.header)
+            if r.status_code == 200:
+                response = loads(r.text)
+                info = response['data']['userInfo']
+                self.signed = info['is'] == 1
+                return info
         except exceptions.RequestException:
             pass
+
+        return None
+
 
     def signin(self):
-        try:
-            self.day()
-            #the 't_sign_auth' cookie is nessary
-            r = self.session.post(Signin.signurl,
-                    headers = self.head,
-                    cookies = {'t_sign_auth':self.signedday})
-            if r.status_code ==200 and self.signedday != r.text:
-                self.signedday = r.text
-                return True
+        r = self.sign_info()
+        if self.signed:
+            return (True, r['sign']['persist_num'])
+        elif r:
+            try:
+                self.account.session.post(XiamiSignin.SigninURL,
+                        headers = XiamiSignin.header)
+                r = self.sign_info()
+                return (self.signed, r['sign']['persist_num'])
+            except exceptions.RequestException:
+                pass
 
-        except exceptions.RequestException:
-            pass
-        return False
+        return (False, '-1')
+
 
 def main(sign_list):
     for i in range(len(sign_list)//2):
         u = sign_list[2*i].strip()
         p = sign_list[2*i+1].strip()
-        xiami = Signin(u,p)
-        xiami.login()
-        if xiami.signin():
-            print("Success: {0} has signed {1} days".format(u,xiami.signedday))
-        else:
-            print("Failure: {0} ".format(u))
-        xiami.logout()
+        xiami = XiamiSignin(u, p)
+        res = xiami.signin()
+        print("{0}: {1} has signed {2} days".format(
+            "Success" if res[0] else "Failure",
+            xiami.account.email,
+            res[1]))
+        xiami.account.logout()
 
 
 
